@@ -103,14 +103,18 @@ func (w *Writer) listen() {
 }
 
 // Flush flushes the buffer if it contains messages.
-func (w *Writer) Flush() {
+func (w *Writer) Flush() error {
 	w.messageBuffer.Lock()
 	defer w.messageBuffer.Unlock()
-	if len(w.messageBuffer.buffer) > 0 {
-		w.send(w.messageBuffer.buffer, w.MaxRetries)
+	if len(w.messageBuffer.buffer) == 0 {
+		return nil
 	}
+
+	err := w.send(w.messageBuffer.buffer, w.MaxRetries)
 	// Make a new array since the old one is getting used by the splunk client now
 	w.messageBuffer.buffer = make([]*message, 0)
+
+	return err
 }
 
 // BufferIsEmpty checks if the buffer is empty.
@@ -121,7 +125,7 @@ func (w *Writer) BufferIsEmpty() bool {
 }
 
 // send sends data to splunk, retrying upon failure
-func (w *Writer) send(messages []*message, retries int) {
+func (w *Writer) send(messages []*message, retries int) error {
 	// Create events from our data so we can send them to splunk
 	events := make([]*Event, len(messages))
 	for i, m := range messages {
@@ -136,7 +140,7 @@ func (w *Writer) send(messages []*message, retries int) {
 			// retry
 			err = w.Client.LogEvents(events)
 			if err == nil {
-				return
+				return nil
 			}
 		}
 		// if we've exhausted our max retries, let someone know via Errors()
@@ -146,5 +150,9 @@ func (w *Writer) send(messages []*message, retries int) {
 		// Don't block in case no one is listening or our errors channel is full
 		default:
 		}
+
+		return err
 	}
+
+	return nil
 }
