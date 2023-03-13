@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestWriter_Write(t *testing.T) {
@@ -61,9 +63,31 @@ func TestWriter_Write(t *testing.T) {
 		t.Errorf("Timed out waiting for messages")
 	}
 	// We may have received more than numWrites amount of messages, check that case
+	lock.Lock()
 	if numMessages != numWrites {
 		t.Errorf("Didn't get the right number of messages, expected %d, got %d", numWrites, numMessages)
 	}
+}
+
+func TestIsEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	writer := Writer{Client: NewClient(server.Client(), server.URL, "", "", "", "")}
+
+	writer.Write([]byte("Test Message"))
+
+	// wait for maximum one second to have message in buffer
+	for start := time.Now(); time.Since(start) < time.Second; {
+		if !writer.BufferIsEmpty() {
+			break
+		}
+	}
+
+	assert.False(t, writer.BufferIsEmpty())
+
+	writer.Flush()
+
+	assert.True(t, writer.BufferIsEmpty())
 }
 
 func TestWriter_Errors(t *testing.T) {
