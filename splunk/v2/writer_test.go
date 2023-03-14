@@ -13,12 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestWriter_Write(t *testing.T) {
-	numWrites := 1000
-	numMessages := 0
-	lock := sync.Mutex{}
-	notify := make(chan bool, numWrites)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func server(lock *sync.Mutex, numMessages *int, notify chan bool) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		b, _ := ioutil.ReadAll(r.Body)
 		split := strings.Split(string(b), "\n")
 		num := 0
@@ -32,63 +28,83 @@ func TestWriter_Write(t *testing.T) {
 			}
 		}
 		lock.Lock()
-		numMessages = numMessages + num
+		*numMessages += num
 		lock.Unlock()
-	}))
-
-	// Create a writer that's flushing constantly. We want this test to run
-	// quickly
-	writer := Writer{
-		Client:        NewClient(server.Client(), server.URL, "", "", "", ""),
-		FlushInterval: 1 * time.Millisecond,
 	}
-	// Send a bunch of messages in separate goroutines to make sure we're properly
-	// testing Writer's concurrency promise
-	for i := 0; i < numWrites; i++ {
-		go writer.Write([]byte(fmt.Sprintf("%d", i)))
-	}
-	// To notify our test we've collected everything we need.
-	doneChan := make(chan bool)
-	go func() {
-		for i := 0; i < numWrites; i++ {
-			// Do nothing, just loop through to the next one
-			<-notify
-		}
-		doneChan <- true
-	}()
-	select {
-	case <-doneChan:
-		// Do nothing, we're good
-	case <-time.After(1 * time.Second):
-		t.Errorf("Timed out waiting for messages")
-	}
-
-	lock.Lock()
-	if numMessages != numWrites {
-		t.Errorf("Didn't get the right number of messages, expected %d, got %d", numWrites, numMessages)
-	}
-	lock.Unlock()
 }
 
-func TestIsEmpty(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+func TestWriter_Write(t *testing.T) {
+	var tests = []*struct {
+		name   string
+		writer *Writer
+	}{
+		{
+			name:   "flush based on ticker",
+			writer: &Writer{FlushInterval: time.Nanosecond, FlushThreshold: 1000000000},
+		},
+		{
+			name:   "flush based on threshold",
+			writer: &Writer{FlushThreshold: 10, FlushInterval: time.Hour},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			numWrites := 1000
+			numMessages := 0
+			lock := &sync.Mutex{}
+			notify := make(chan bool, numWrites)
+			server := httptest.NewServer(http.HandlerFunc(server(lock, &numMessages, notify)))
 
-	writer := Writer{Client: NewClient(server.Client(), server.URL, "", "", "", "")}
+			// Create a writer that's flushing constantly. We want this test to run quickly
+			test.writer.Client = NewClient(server.Client(), server.URL, "", "", "", "")
+			// Send a bunch of messages in separate goroutines to make sure we're properly
+			// testing Writer's concurrency promise
+			for i := 0; i < numWrites; i++ {
+				go test.writer.Write([]byte(fmt.Sprintf("%d", i)))
+			}
 
-	writer.Write([]byte("Test Message"))
+			// To notify our test we've collected everything we need.
+			doneChan := make(chan bool)
+			go func() {
+				for i := 0; i < numWrites; i++ {
+					// Do nothing, just loop through to the next one
+					<-notify
+				}
+				doneChan <- true
+			}()
+			select {
+			case <-doneChan:
+				// Do nothing, we're good
+			case <-time.After(1 * time.Second):
+				t.Errorf("Timed out waiting for messages")
+			}
 
-	// wait for maximum one second to have message in buffer
-	for start := time.Now(); time.Since(start) < time.Second; {
-		if !writer.BufferIsEmpty() {
-			break
-		}
+			lock.Lock()
+			assert.Equal(t, numWrites, numMessages)
+			lock.Unlock()
+		})
+	}
+}
+
+func TestFlush(t *testing.T) {
+	numWrites := 17
+	lock := &sync.Mutex{}
+	notify := make(chan bool, numWrites)
+	numMessages := 0
+	server := httptest.NewServer(http.HandlerFunc(server(lock, &numMessages, notify)))
+
+	// configure writer to not automatically flush
+	writer := Writer{Client: NewClient(server.Client(), server.URL, "", "", "", ""), FlushThreshold: 25, FlushInterval: time.Hour}
+
+	for i := 0; i < numWrites; i++ {
+		writer.Write([]byte(fmt.Sprintf("%d", i)))
 	}
 
-	assert.False(t, writer.BufferIsEmpty())
+	err := writer.Close()
+	assert.Nil(t, err)
 
-	writer.Flush()
-
-	assert.True(t, writer.BufferIsEmpty())
+	lock.Lock()
+	assert.Equal(t, numWrites, numMessages)
 }
 
 func TestWriter_Errors(t *testing.T) {

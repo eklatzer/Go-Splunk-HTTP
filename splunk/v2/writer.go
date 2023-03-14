@@ -31,6 +31,7 @@ type Writer struct {
 	errors        chan error
 	once          sync.Once
 	messageBuffer messageBuffer
+	wg            sync.WaitGroup
 }
 
 type messageBuffer struct {
@@ -56,6 +57,17 @@ func (w *Writer) Write(b []byte) (int, error) {
 		w.errors = make(chan error, bufferSize)
 		go w.listen()
 	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			err, ok := r.(error)
+			if ok {
+				w.error(err)
+			}
+		}
+	}()
+
+	w.wg.Add(1)
 	// Make a local copy of the bytearray so it doesn't get overwritten by
 	// the next call to Write()
 	var b2 = make([]byte, len(b))
@@ -75,6 +87,13 @@ func (w *Writer) Errors() <-chan error {
 	return w.errors
 }
 
+// Close closes the data-channel and flushes all messages.
+func (w *Writer) Close() error {
+	w.wg.Wait()
+	close(w.dataChan)
+	return w.flush()
+}
+
 // listen for messages
 func (w *Writer) listen() {
 	if w.FlushInterval <= 0 {
@@ -83,36 +102,44 @@ func (w *Writer) listen() {
 	if w.FlushThreshold == 0 {
 		w.FlushThreshold = defaultThreshold
 	}
-	ticker := time.NewTicker(w.FlushInterval)
-	for {
-		var flushRequired = false
-		select {
-		case <-ticker.C:
-			flushRequired = true
-		case d := <-w.dataChan:
-			w.messageBuffer.Lock()
-			w.messageBuffer.buffer = append(w.messageBuffer.buffer, d)
-			flushRequired = len(w.messageBuffer.buffer) > w.FlushThreshold
-			w.messageBuffer.Unlock()
+
+	flush := func() {
+		err := w.flush()
+		if err != nil {
+			w.error(err)
 		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(w.FlushInterval)
+		for range ticker.C {
+			flush()
+		}
+	}()
+
+	for d := range w.dataChan {
+		w.messageBuffer.Lock()
+		w.messageBuffer.buffer = append(w.messageBuffer.buffer, d)
+		flushRequired := len(w.messageBuffer.buffer) >= w.FlushThreshold
+		w.messageBuffer.Unlock()
+
+		w.wg.Done()
 
 		if flushRequired {
-			go func() {
-				err := w.Flush()
-				if err != nil {
-					select {
-					case w.errors <- err:
-					// Don't block in case no one is listening or our errors channel
-					default:
-					}
-				}
-			}()
+			flush()
 		}
 	}
 }
 
-// Flush flushes the buffer if it contains messages.
-func (w *Writer) Flush() error {
+func (w *Writer) error(err error) {
+	select {
+	case w.errors <- err:
+	// Don't block in case no one is listening or our errors channel
+	default:
+	}
+}
+
+func (w *Writer) flush() error {
 	w.messageBuffer.Lock()
 	defer w.messageBuffer.Unlock()
 	if len(w.messageBuffer.buffer) == 0 {
@@ -124,13 +151,6 @@ func (w *Writer) Flush() error {
 	w.messageBuffer.buffer = make([]*message, 0)
 
 	return err
-}
-
-// BufferIsEmpty checks if the buffer is empty.
-func (w *Writer) BufferIsEmpty() bool {
-	w.messageBuffer.RLock()
-	defer w.messageBuffer.RUnlock()
-	return len(w.messageBuffer.buffer) == 0
 }
 
 // send sends data to splunk, retrying upon failure
