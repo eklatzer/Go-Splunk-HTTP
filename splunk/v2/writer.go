@@ -2,6 +2,7 @@ package splunk
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -60,10 +61,7 @@ func (w *Writer) Write(b []byte) (int, error) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			err, ok := r.(error)
-			if ok {
-				w.error(err)
-			}
+			w.error(fmt.Errorf("failed to write: %v", r))
 		}
 	}()
 

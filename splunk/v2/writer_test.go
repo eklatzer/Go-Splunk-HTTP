@@ -86,7 +86,7 @@ func TestWriter_Write(t *testing.T) {
 	}
 }
 
-func TestFlush(t *testing.T) {
+func TestClose(t *testing.T) {
 	numWrites := 17
 	lock := &sync.Mutex{}
 	notify := make(chan bool, numWrites)
@@ -105,6 +105,24 @@ func TestFlush(t *testing.T) {
 
 	lock.Lock()
 	assert.Equal(t, numWrites, numMessages)
+	lock.Unlock()
+
+	// send on closed channel and check if error is correctly send to error channel
+	var wg = sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		select {
+		case e := <-writer.Errors():
+			assert.ErrorContains(t, e, "send on closed channel")
+		case <-time.After(1 * time.Second):
+			t.Errorf("Timed out waiting for expected error")
+		}
+		wg.Done()
+	}()
+
+	writer.Write([]byte("test"))
+	wg.Wait()
 }
 
 func TestWriter_Errors(t *testing.T) {
