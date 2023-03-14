@@ -88,7 +88,9 @@ func (w *Writer) Errors() <-chan error {
 // Close closes the data-channel and flushes all messages.
 func (w *Writer) Close() error {
 	w.wg.Wait()
-	close(w.dataChan)
+	if w.dataChan != nil {
+		close(w.dataChan)
+	}
 	return w.flush()
 }
 
