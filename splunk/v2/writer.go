@@ -97,7 +97,16 @@ func (w *Writer) listen() {
 		}
 
 		if flushRequired {
-			go w.Flush()
+			go func() {
+				err := w.Flush()
+				if err != nil {
+					select {
+					case w.errors <- err:
+					// Don't block in case no one is listening or our errors channel
+					default:
+					}
+				}
+			}()
 		}
 	}
 }
@@ -134,25 +143,18 @@ func (w *Writer) send(messages []*message, retries int) error {
 	}
 	// Send the events to splunk
 	err := w.Client.LogEvents(events)
-	// If we had any failures, retry as many times as they requested
-	if err != nil {
-		for i := 0; i < retries; i++ {
-			// retry
-			err = w.Client.LogEvents(events)
-			if err == nil {
-				return nil
-			}
-		}
-		// if we've exhausted our max retries, let someone know via Errors()
-		// might not have retried if retries == 0
-		select {
-		case w.errors <- err:
-		// Don't block in case no one is listening or our errors channel is full
-		default:
-		}
-
-		return err
+	if err == nil {
+		return nil
 	}
 
-	return nil
+	// If we had any failures, retry as many times as they requested
+	for i := 0; i < retries; i++ {
+		// retry
+		err = w.Client.LogEvents(events)
+		if err == nil {
+			return nil
+		}
+	}
+
+	return err
 }
